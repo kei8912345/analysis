@@ -1,145 +1,122 @@
 # -*- coding: utf-8 -*-
 import numpy as np
-import pandas as pd
+from structs import SensorData
 
 class PhysicsEngine:
     """
     物理量の計算を行うクラス。
-    負圧入力によるNaN発生を防ぐ安全装置付き。
     """
-    
-    GAS_CONSTANTS = {
-        "Air": 287.058, "H2": 4124.0, "N2": 296.8, "O2": 259.8, "Ar": 208.1
-    }
-    GAMMAS = {
-        "Air": 1.4, "H2": 1.405, "N2": 1.4, "O2": 1.395, "Ar": 1.667
-    }
+    GAS_CONSTANTS = {"Air": 287.058, "H2": 4124.0, "N2": 296.8, "O2": 259.8, "Ar": 208.1}
+    GAMMAS = {"Air": 1.4, "H2": 1.405, "N2": 1.4, "O2": 1.395, "Ar": 1.667}
 
     def __init__(self):
         pass
 
-    def add_derived_channels(self, df, derived_configs, sampling_rate=None):
-        if df is None or df.empty or not derived_configs:
-            return df
+    def add_derived_channels(self, data_store, derived_configs):
+        """
+        Args:
+            data_store (dict): {name: SensorData}
+            derived_configs (dict): derived_channels config
+        """
+        if not data_store or not derived_configs:
+            return data_store
 
-        print("  [Physics] 派生物理量の計算を開始します...")
+        print("  [Physics] 派生物理量の計算...")
 
         for name, config in derived_configs.items():
             calc_type = config.get('type')
-            if calc_type == 'choked_flow' or calc_type == 'nozzle_flow':
-                self._calc_compressible_flow(df, name, config, sampling_rate)
+            if calc_type in ['choked_flow', 'nozzle_flow']:
+                self._calc_compressible_flow(data_store, name, config)
             
-        return df
+        return data_store
 
-    def _get_values(self, df, source):
-        if isinstance(source, (int, float)):
-            return source
-        if isinstance(source, str):
-            if source in df.columns:
-                return df[source]
+    def _get_data_array(self, data_store, source_key):
+        """ソースがキーなら配列を、数値ならその値を返す"""
+        if isinstance(source_key, str) and source_key in data_store:
+            return data_store[source_key].data
+        if isinstance(source_key, (int, float)):
+            return float(source_key)
         return None
 
-    def _calc_compressible_flow(self, df, target_name, config, sampling_rate):
-        """
-        圧縮性流体の流量計算
-        """
-        src_p_key = config.get('source_p')
-        src_t_key = config.get('source_t')
+    def _calc_compressible_flow(self, data_store, target_name, config):
+        src_p = config.get('source_p')
+        src_t = config.get('source_t')
         
-        P_raw = self._get_values(df, src_p_key)
-        T_raw = self._get_values(df, src_t_key)
+        # 配列(または定数)の取得
+        P_raw = self._get_data_array(data_store, src_p)
+        T_raw = self._get_data_array(data_store, src_t)
 
         if P_raw is None or T_raw is None:
-            print(f"    ⚠️ 計算スキップ: データ不足 (P={src_p_key}, T={src_t_key})")
+            print(f"    ⚠️ 計算スキップ: ソース不足 ({target_name})")
             return
 
-        # --- パラメータ取得 ---
+        # 基準となるSensorDataを取得 (fsやtime同期のため)
+        # 基本的に圧力センサ側をマスターとする
+        ref_sensor = data_store.get(src_p)
+        if not ref_sensor and isinstance(src_p, str): return # データがない場合
+        
+        # パラメータ
         gas_type = config.get('gas_type', 'Air')
         Cd = config.get('Cd', 1.0)
         A_mm2 = config.get('A_mm2', 1.0)
         cutoff_ratio = config.get('cutoff_ratio', 1.0)
-        
-        R = self.GAS_CONSTANTS.get(gas_type, 287.058)
+        R = self.GAS_CONSTANTS.get(gas_type, 287.0)
         gamma = self.GAMMAS.get(gas_type, 1.4)
-
-        # --- 背圧(P_back)の自動計算 ---
-        back_pressure_duration = config.get('back_pressure_duration', 0.5)
-        P_back_MPa = 0.1013
-
-        if isinstance(P_raw, (pd.Series, np.ndarray)) and sampling_rate:
-            n_samples = int(back_pressure_duration * sampling_rate)
-            n_samples = min(n_samples, len(P_raw))
-            if n_samples > 0:
-                P_back_MPa = P_raw.iloc[:n_samples].mean()
-                print(f"    🔍 背圧自動取得 ({back_pressure_duration}s): {P_back_MPa:.4f} MPa")
-            else:
-                print("    ⚠️ 背圧計算エラー: データ点数が0です。")
-        else:
-            print("    ℹ️ 背圧固定値を使用")
-
-        # --- 計算準備 ---
-        # ★修正: P0_Pa が 負や0 になると計算が爆発(NaN)するので、極小値(1e-9)でクリップする
-        # これにより、オフセットズレで -0.001 MPa とかになってもエラーにならない
-        P0_Pa = P_raw * 1.0e6
-        if isinstance(P0_Pa, (pd.Series, np.ndarray)):
-            P0_Pa = np.maximum(P0_Pa, 1.0e-9)
-        else:
-            P0_Pa = max(P0_Pa, 1.0e-9)
-
-        Pb_Pa = P_back_MPa * 1.0e6
         
-        T0_K = T_raw
-        if isinstance(T0_K, (pd.Series, np.ndarray)):
-            T0_safe = T0_K.abs() + 1e-9
-        else:
-            T0_safe = abs(T0_K) + 1e-9
-            
+        # 単位変換 & 安全策
+        # P: MPa -> Pa
+        P0_Pa = np.maximum(P_raw * 1.0e6, 1.0e-9) 
+        # T: K (絶対値)
+        T0_safe = np.abs(T_raw) + 1e-9
         A_m2 = A_mm2 * 1.0e-6
 
-        # --- 圧力比計算 ---
-        # Pb / P0 (背圧 / 上流圧)
-        current_ratio = np.divide(Pb_Pa, P0_Pa)
+        # 背圧 (簡易的に固定 or 平均)
+        # ※ 時系列で背圧がある場合は対応が必要だが、ここでは固定値の簡易実装
+        P_back_MPa = 0.1013
+        Pb_Pa = P_back_MPa * 1.0e6
 
-        # 臨界圧力比
+        # 計算 (NumPy配列演算)
+        current_ratio = np.divide(Pb_Pa, P0_Pa)
         critical_ratio = (2 / (gamma + 1)) ** (gamma / (gamma - 1))
-        
-        # --- 流量計算 ---
-        # 1. チョーク (理論最大流量)
+
+        # 1. Choked Flow
         term_choked = np.sqrt(gamma * (2 / (gamma + 1)) ** ((gamma + 1) / (gamma - 1)))
         m_dot_choked = (Cd * A_m2 * P0_Pa / np.sqrt(R * T0_safe)) * term_choked
 
-        # 2. 亜音速 (Saint-Venant)
-        # ★修正: マイナス乗などによるNaNを防ぐため、計算順序に注意
-        term_unchoked_inner = (current_ratio ** (2 / gamma)) - (current_ratio ** ((gamma + 1) / gamma))
-        term_unchoked_inner = np.maximum(term_unchoked_inner, 0)
-        
+        # 2. Unchoked Flow
+        term_inner = (current_ratio ** (2/gamma)) - (current_ratio ** ((gamma+1)/gamma))
+        term_inner = np.maximum(term_inner, 0) # ルート内負防止
         m_dot_unchoked = Cd * A_m2 * P0_Pa * np.sqrt(
-            (2 * gamma / (R * T0_safe * (gamma - 1))) * term_unchoked_inner
+            (2*gamma / (R*T0_safe*(gamma-1))) * term_inner
         )
 
-        # --- 統合 & カットオフ ---
-        m_dot_kg_s = m_dot_choked
+        # 統合
+        m_dot = m_dot_choked.copy() if isinstance(m_dot_choked, np.ndarray) else np.full_like(P0_Pa, m_dot_choked)
         
-        # 亜音速領域の上書き
+        # 条件分岐 (np.where)
         mask_unchoked = (current_ratio > critical_ratio) & (current_ratio < 1.0)
-        
-        if isinstance(m_dot_kg_s, (pd.Series, np.ndarray)):
-            m_dot_kg_s = np.where(mask_unchoked, m_dot_unchoked, m_dot_kg_s)
-            
-            # カットオフ判定
-            mask_no_flow = (current_ratio >= cutoff_ratio)
-            m_dot_kg_s = np.where(mask_no_flow, 0.0, m_dot_kg_s)
-        else:
-            if current_ratio >= cutoff_ratio: m_dot_kg_s = 0.0
-            elif current_ratio > critical_ratio: m_dot_kg_s = m_dot_unchoked
+        mask_cutoff = (current_ratio >= cutoff_ratio)
 
-        m_dot_g_s = m_dot_kg_s * 1000.0
-        df[target_name] = m_dot_g_s
+        if isinstance(m_dot, np.ndarray):
+            m_dot[mask_unchoked] = m_dot_unchoked[mask_unchoked] if isinstance(m_dot_unchoked, np.ndarray) else m_dot_unchoked
+            m_dot[mask_cutoff] = 0.0
         
-        # NaN除去して平均を表示
-        res_mean = np.nanmean(m_dot_g_s) if hasattr(m_dot_g_s, 'mean') else m_dot_g_s
-        print(f"    🔍 流量計算完了 [{target_name}]:")
-        print(f"       - 臨界圧力比 : {critical_ratio:.4f}")
-        print(f"       - 平均背圧   : {P_back_MPa:.4f} MPa")
-        print(f"       - カットオフ : 比率 {cutoff_ratio} 以上は流量0とみなします")
-        print(f"       - 平均流量   : {res_mean:.4f} g/s")
+        # 単位変換 kg/s -> g/s
+        result_data = m_dot * 1000.0
+
+        # 結果をSensorDataとして登録
+        # fsやstart_timeは親センサ(P)を引き継ぐ
+        fs_new = ref_sensor.fs if ref_sensor else 1.0
+        t0_new = ref_sensor.start_time if ref_sensor else 0.0
+
+        new_sensor = SensorData(
+            name=target_name,
+            data=result_data,
+            fs=fs_new,
+            unit="g/s",
+            start_time=t0_new,
+            source=f"Derived(from {src_p})"
+        )
+        
+        data_store[target_name] = new_sensor
+        print(f"    🔍 計算完了: {target_name} (Mean: {np.mean(result_data):.2f} g/s)")
