@@ -28,7 +28,6 @@ class STFTAnalyzer:
         nperseg = settings.get('nperseg', 512)
         noverlap = settings.get('noverlap', 256)
         
-        # ★変更点: 保存先を .cache/stft に隠す
         save_dir = os.path.join(output_root_dir, ".cache", "stft")
         os.makedirs(save_dir, exist_ok=True)
         results = {}
@@ -51,16 +50,32 @@ class STFTAnalyzer:
             )
             
             t_abs = t + sensor.start_time
+            amp = np.abs(Zxx)
+
+            # --- ★追加: ピーク周波数と強度の抽出 ---
+            # 各時間ステップ(列)ごとに、最大値を持つインデックスを探す
+            max_indices = np.argmax(amp, axis=0)
             
+            # インデックスを周波数に変換
+            peak_freqs = f[max_indices]
+            
+            # その周波数の強度を取得 (対数dB変換しておく)
+            # fancy indexing: [行インデックス配列, 列インデックス配列]
+            peak_powers = 20 * np.log10(amp[max_indices, np.arange(amp.shape[1])] + 1e-9)
+
             results[name] = {
                 'f': f,
                 't': t_abs,
                 'Zxx': Zxx,
-                'Amp': np.abs(Zxx),
+                'Amp': amp,
                 'fs': fs,
-                'unit': sensor.unit
+                'unit': sensor.unit,
+                # 解析結果として保存
+                'peak_freq': peak_freqs,   # 時系列: 周波数 [Hz]
+                'peak_power': peak_powers, # 時系列: 強度 [dB]
+                'dt_stft': t[1] - t[0] if len(t) > 1 else 0 # 時間刻み
             }
-            print(f"    ✅ {name}: {len(t)} steps (fs={fs:.0f}Hz)")
+            print(f"    ✅ {name}: {len(t)} steps (fs={fs:.0f}Hz) -> Peak Trace Extracted")
 
         shot_num = spec_config.get('shot_number', 0)
         save_path = os.path.join(save_dir, f"shot{shot_num:03d}_stft.pkl")

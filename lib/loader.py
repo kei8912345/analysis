@@ -3,17 +3,20 @@ import os
 import glob
 import re
 import pickle
+import numpy as np
 
 try:
     from .converter import DataConverter
     from .physics import PhysicsEngine
     from .processor import DataProcessor
+    from .structs import SensorData # 追加
 except ImportError:
     import sys
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
     from converter import DataConverter
     from physics import PhysicsEngine
     from processor import DataProcessor
+    from structs import SensorData
 
 class DataLoader:
     TARGET_SOURCES = ['pressure', 'vibration', 'hsc']
@@ -34,12 +37,9 @@ class DataLoader:
         shot_number = spec_config['shot_number']
         measurements = spec_config.get('measurements', [])
         processing_config = spec_config.get('processing', {})
-        
-        # ★修正: spec.yaml から acquisition 設定を読み込む
         acquisition_config = spec_config.get('acquisition', {})
-        # デフォルトサンプリングレート
+        
         default_sr = float(acquisition_config.get('sampling_rate', 1000.0))
-        # ★重要: トリガー前時間 (例: -0.1) を取得
         start_time_offset = float(acquisition_config.get('start_time', 0.0))
         
         data_store = {}
@@ -54,9 +54,7 @@ class DataLoader:
 
             # === HSC ===
             if source_name == 'hsc':
-                # HSCは hsc_analyzer 側で pre_trigger_frames から start_time を計算済み
                 hsc_pkl_path = os.path.join(cache_root, f"shot{shot_number:03d}_hsc.pkl")
-                
                 if os.path.exists(hsc_pkl_path):
                     try:
                         with open(hsc_pkl_path, 'rb') as f:
@@ -64,15 +62,11 @@ class DataLoader:
                             if isinstance(hsc_data, dict):
                                 data_store.update(hsc_data)
                                 print(f"  -> HSCデータ結合: {len(hsc_data)} items")
-                            else:
-                                print(f"  ⚠️ HSCキャッシュ形式不一致 (スキップ)")
                     except Exception as e:
                         print(f"  ⚠️ HSCロード失敗: {e}")
-                else:
-                    print(f"  ℹ️  HSCキャッシュなし (未解析): {os.path.basename(hsc_pkl_path)}")
                 continue
 
-            # === CSV系センサ (Pressure, Vibration) ===
+            # === CSV系センサ ===
             folder_name = source_info.get('folder')
             hint = source_info.get('hint', None)
             target_dir = os.path.join(self.base_dir, folder_name)
@@ -89,24 +83,17 @@ class DataLoader:
             if not force_reload and self._is_cache_valid(csv_path, cache_path):
                 try:
                     with open(cache_path, 'rb') as f:
-                        temp_data = pickle.load(f)
-                        if isinstance(temp_data, dict):
-                            # ★キャッシュの start_time が spec と合っているか確認するのは難しいので
-                            # specの値で上書きする処理を入れるとより安全だが、今回はConverter再実行で対応
-                            loaded_dict = temp_data
-                        else:
-                            print(f"  🔄 古い形式のキャッシュを検出 -> 再生成します")
+                        loaded_dict = pickle.load(f)
                 except: pass
             
             if loaded_dict is None:
-                # ★修正: start_time と sampling_rate を渡す
                 save_path = self.converter.process(
                     csv_path=csv_path, 
                     output_dir=cache_root, 
                     sensor_configs=measurements, 
                     processing_config=processing_config,
                     default_sampling_rate=default_sr,
-                    default_start_time=start_time_offset # ← これが重要
+                    default_start_time=start_time_offset
                 )
                 if save_path:
                     with open(save_path, 'rb') as f:
@@ -115,6 +102,49 @@ class DataLoader:
             if loaded_dict and isinstance(loaded_dict, dict):
                 data_store.update(loaded_dict)
                 print(f"  -> 結合: {len(loaded_dict)} items from {source_name}")
+
+        # --- ★追加: STFTの解析結果があればロードして時系列データとして統合 ---
+        stft_dir = os.path.join(self.results_root, ".cache", "stft")
+        stft_pkl = os.path.join(stft_dir, f"shot{shot_number:03d}_stft.pkl")
+        if os.path.exists(stft_pkl):
+            try:
+                with open(stft_pkl, 'rb') as f:
+                    stft_res = pickle.load(f)
+                    count = 0
+                    for key, val in stft_res.items():
+                        if 'peak_freq' in val and 't' in val:
+                            # ピーク周波数の時系列
+                            t_arr = val['t']
+                            # fsは時間刻みの逆数から概算
+                            fs_est = 1.0 / (t_arr[1] - t_arr[0]) if len(t_arr) > 1 else 1.0
+                            t0 = t_arr[0]
+                            
+                            # 名前: 元の名前 + "_PeakFreq"
+                            new_name = f"{key}_PeakFreq"
+                            data_store[new_name] = SensorData(
+                                name=new_name,
+                                data=val['peak_freq'],
+                                fs=fs_est,
+                                unit="Hz",
+                                start_time=t0,
+                                source="STFT_Analysis"
+                            )
+                            
+                            # 強度も保存: 元の名前 + "_PeakPower"
+                            new_name_p = f"{key}_PeakPower"
+                            data_store[new_name_p] = SensorData(
+                                name=new_name_p,
+                                data=val['peak_power'],
+                                fs=fs_est,
+                                unit="dB",
+                                start_time=t0,
+                                source="STFT_Analysis"
+                            )
+                            count += 2
+                    if count > 0:
+                        print(f"  -> STFT抽出データ結合: {count} items (PeakFreq, PeakPower)")
+            except Exception as e:
+                print(f"  ⚠️ STFTロード警告: {e}")
 
         if not data_store:
             print("❌ 有効なデータがロードできませんでした。")
