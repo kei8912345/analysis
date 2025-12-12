@@ -7,16 +7,21 @@ from cycler import cycler
 import pickle
 import numpy as np
 
+# ★ Fittingモジュールをインポート
+try:
+    from .fitting import CoastingFitter
+except ImportError:
+    from fitting import CoastingFitter
+
 class Visualizer:
     def __init__(self, output_dir):
         self.output_dir = output_dir
         self.figures_dir = os.path.join(output_dir, "figures")
-        
         self.shared_time_ranges = {}
-
+        
         # --- Matplotlib設定 ---
         plt.rcParams['font.family'] = 'serif'
-        plt.rcParams['mathtext.fontset'] = 'stix'
+        plt.rcParams['mathtext.fontset'] = 'stix' # 数式フォントはSTIX (Times風)
         plt.rcParams['font.size'] = 12
         plt.rcParams['xtick.direction'] = 'in'
         plt.rcParams['ytick.direction'] = 'in'
@@ -28,11 +33,40 @@ class Visualizer:
         
         system = platform.system()
         if system == 'Windows':
-            plt.rcParams['font.serif'] = ['MS Mincho', 'Times New Roman']
+            # ★修正: Times New Roman を先頭に移動 (英数字はTimes, 日本語はMS明朝)
+            plt.rcParams['font.serif'] = ['Times New Roman', 'MS Mincho']
         elif system == 'Darwin':
-            plt.rcParams['font.serif'] = ['Hiragino Mincho ProN', 'Times New Roman']
+            # Macの場合も同様
+            plt.rcParams['font.serif'] = ['Times New Roman', 'Hiragino Mincho ProN']
+            
+        # フィッティングエンジンの初期化
+        self.fitter = CoastingFitter()
+
+    def _to_latex_sci(self, val, precision=2):
+        """数値をLatex形式の指数表記文字列に変換 (例: 1.2e-4 -> 1.2 \times 10^{-4})"""
+        if val == 0: return "0"
+        
+        s_sci = f"{val:.{precision}e}"
+        base, exponent = s_sci.split('e')
+        exp_val = int(exponent)
+        
+        if exp_val == 0:
+            return f"{float(base):.{precision}f}"
+            
+        return f"{base} \\times 10^{{{exp_val}}}"
 
     def visualize(self, plan_config, data_store=None, stft_pkl_path=None, shot_name=None):
+        if isinstance(plan_config, list):
+            if len(plan_config) > 0 and isinstance(plan_config[0], dict):
+                if 'tasks' in plan_config[0]:
+                     plan_config = plan_config[0]
+                else:
+                     plan_config = {'tasks': plan_config}
+                print("⚠️ Plan config was loaded as a list. Adapted to dict format.")
+            else:
+                print("❌ Plan config format error: Expected dict or list of tasks.")
+                return
+
         raw_tasks = plan_config.get('tasks', [])
         if not raw_tasks: return
 
@@ -46,7 +80,6 @@ class Visualizer:
                 with open(stft_pkl_path, 'rb') as f: stft_data = pickle.load(f)
             except: pass
 
-        # 実行順序の制御
         providers = []
         consumers = []
         others = []
@@ -71,12 +104,13 @@ class Visualizer:
                 if data_store: self._plot_timeseries(data_store, task)
             elif kind == 'stft_spectrogram':
                 if stft_data: self._plot_spectrogram(stft_data, task, shot_name)
+            elif kind == 'coasting_fit':
+                if data_store: self._plot_coasting_fit(data_store, task, shot_name)
 
     def _plot_timeseries(self, data_store, task):
         title = task.get('title', 'Untitled')
         opts = task.get('plot_options', {})
         
-        # --- デバッグ出力（シンプル版） ---
         if 'legend_labels' in opts:
             targets = list(opts['legend_labels'].keys())
             print(f"    ℹ️  [設定] '{title}': 凡例ラベル置換あり -> {targets}")
@@ -112,8 +146,6 @@ class Visualizer:
                 if freq_unit.lower() == 'rpm': y = y * 60.0
                 
                 series_conf = opts.get('series_styles', {}).get(name, {})
-                
-                # --- ラベル名の決定 ---
                 legend_map = opts.get('legend_labels', {})
                 mapped_name = legend_map.get(name, name)
                 label = series_conf.get('label', mapped_name)
@@ -145,15 +177,12 @@ class Visualizer:
             ax2.yaxis.set_minor_locator(AutoMinorLocator())
             ax2.tick_params(which='both', direction='in')
 
-        # --- 凡例表示 ---
         all_lines = lines1 + lines2
         if all_lines:
             labs = [l.get_label() for l in all_lines]
-            
             legend_opts = opts.get('legend', {})
             legend_loc = legend_opts.get('loc', 'upper right')
             legend_fontsize = legend_opts.get('fontsize', 12)
-            
             ax1.legend(all_lines, labs, loc=legend_loc, frameon=False, fontsize=legend_fontsize)
 
         ax1.set_title(title)
@@ -161,7 +190,6 @@ class Visualizer:
         if opts.get('y_lim'): ax1.set_ylim(opts['y_lim'])
         if opts.get('grid'): ax1.grid(True, linestyle=':')
 
-        # --- 統計解析 & 表示 ---
         stats_conf = opts.get('stats', {})
         if stats_conf.get('enable', False) and y1_cols:
             target_name = y1_cols[0]
@@ -181,50 +209,62 @@ class Visualizer:
                         t_start, t_end = self.shared_time_ranges[ref_name]
                 
                 if t_start is None:
-                    max_val = np.nanmax(d)
-                    thresh_ratio = float(stats_conf.get('threshold', 0.9))
-                    thresh_val = max_val * thresh_ratio
-                    valid_indices = np.where(d >= thresh_val)[0]
-                    if len(valid_indices) > 0:
-                        t_start = t[valid_indices[0]]
-                        t_end = t[valid_indices[-1]]
-                        if 'define_range' in stats_conf:
-                            def_name = stats_conf['define_range']
-                            self.shared_time_ranges[def_name] = (t_start, t_end)
-                            print(f"    💾 範囲定義 '{def_name}': {t_start:.3f} - {t_end:.3f} s")
+                    search_trange = stats_conf.get('search_time_range')
+                    search_mask = np.ones(len(t), dtype=bool)
+                    if search_trange and len(search_trange) == 2:
+                        t_min, t_max = search_trange
+                        search_mask = (t >= t_min) & (t <= t_max)
+                    
+                    valid_search_data = d[search_mask]
+                    if len(valid_search_data) > 0:
+                        value_limit = stats_conf.get('value_limit')
+                        if value_limit is not None:
+                            valid_search_data = valid_search_data[valid_search_data <= float(value_limit)]
+
+                        if len(valid_search_data) > 0:
+                            max_val = np.nanmax(valid_search_data)
+                            thresh_ratio = float(stats_conf.get('threshold', 0.95))
+                            thresh_val = max_val * thresh_ratio
+                            
+                            valid_indices = np.where((d >= thresh_val) & search_mask)[0]
+                            
+                            if len(valid_indices) > 0:
+                                t_start = t[valid_indices[0]]
+                                t_end = t[valid_indices[-1]]
+                                if 'define_range' in stats_conf:
+                                    def_name = stats_conf['define_range']
+                                    self.shared_time_ranges[def_name] = (t_start, t_end)
+                                    print(f"    💾 範囲定義 '{def_name}': {t_start:.3f} - {t_end:.3f} s (Max: {max_val:.2f})")
 
                 if t_start is not None and t_end is not None:
                     mask = (t >= t_start) & (t <= t_end)
                     segment = d[mask]
-                    
+                    value_limit = stats_conf.get('value_limit')
+                    if value_limit is not None and len(segment) > 0:
+                        segment = segment[segment <= float(value_limit)]
+
                     if len(segment) > 0:
                         mean_val = np.nanmean(segment)
-                        max_val = np.nanmax(segment)
-                        
+                        max_val_seg = np.nanmax(segment)
                         lc = stats_conf.get('color', 'red')
                         ax1.axvline(t_start, color=lc, linestyle=':', linewidth=1.5, alpha=0.8)
                         ax1.axvline(t_end, color=lc, linestyle=':', linewidth=1.5, alpha=0.8)
                         
                         calc_modes = stats_conf.get('calc_mode', 'mean')
                         if isinstance(calc_modes, str): calc_modes = [calc_modes]
-                        
                         lines = []
                         if "mean" in calc_modes: lines.append(f"Mean: {mean_val:.2f}")
-                        if "max" in calc_modes:  lines.append(f"Max:  {max_val:.2f}")
-                        
-                        stats_text = "\n".join(lines)
-                        
-                        stats_pos = stats_conf.get('position', [0.95, 0.80])
-                        stats_fontsize = stats_conf.get('fontsize', 12)
-                        
-                        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor=lc)
-                        ax1.text(stats_pos[0], stats_pos[1], stats_text, transform=ax1.transAxes, fontsize=stats_fontsize,
-                                verticalalignment='top', horizontalalignment='right', bbox=props)
+                        if "max" in calc_modes:  lines.append(f"Max:  {max_val_seg:.2f}")
+                        if lines:
+                            stats_text = "\n".join(lines)
+                            stats_pos = stats_conf.get('position', [0.95, 0.80])
+                            stats_fontsize = stats_conf.get('fontsize', 12)
+                            props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor=lc)
+                            ax1.text(stats_pos[0], stats_pos[1], stats_text, transform=ax1.transAxes, fontsize=stats_fontsize,
+                                    verticalalignment='top', horizontalalignment='right', bbox=props)
 
-        # ファイル名は元のシンプルな処理に戻しました（LaTeX記号が含まれるとエラーになるので注意）
         safe_title = title.replace(" ", "_").replace("/", "-")
         save_path = os.path.join(self.figures_dir, f"{safe_title}.png")
-        
         plt.savefig(save_path, dpi=300)
         plt.close()
         print(f"    📈 保存: {os.path.basename(save_path)}")
@@ -235,7 +275,6 @@ class Visualizer:
         
         data = stft_all_data[target]
         f, t, Amp = data['f'], data['t'], data['Amp']
-        
         spec_db = 20 * np.log10(Amp + 1e-9)
         opts = task.get('plot_options', {})
 
@@ -245,7 +284,7 @@ class Visualizer:
             default_y_label = "Frequency [rpm]"
         else:
             default_y_label = "Freq [Hz]"
-
+            
         margin_left = 0.15
         margin_right = 0.82
         margin_bottom = 0.15
@@ -253,7 +292,7 @@ class Visualizer:
         
         fig, ax = plt.subplots(figsize=(7, 5))
         fig.subplots_adjust(left=margin_left, right=margin_right, bottom=margin_bottom, top=margin_top)
-
+        
         vmin = np.percentile(spec_db, 5)
         vmax = np.percentile(spec_db, 99)
         if opts.get('c_lim'): vmin, vmax = opts['c_lim']
@@ -264,7 +303,6 @@ class Visualizer:
         cax_left = margin_right + 0.02
         cax_bottom = margin_bottom
         cax_height = margin_top - margin_bottom
-        
         cax = fig.add_axes([cax_left, cax_bottom, cax_width, cax_height])
         plt.colorbar(mesh, cax=cax, label=opts.get('c_label', "Power [dB]"))
         
@@ -284,3 +322,128 @@ class Visualizer:
         plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
         plt.close()
         print(f"    🌈 STFT描画: {save_name} (Unit: {freq_unit})")
+
+    def _plot_coasting_fit(self, data_store, task, shot_name="UnknownShot"):
+        target = task.get('target')
+        if target not in data_store:
+            print(f"    ⚠️ データなし: {target}")
+            return
+            
+        sensor = data_store[target]
+        t_all = sensor.time
+        y_all = sensor.data.copy()
+        
+        title = task.get('title', 'Coasting Analysis')
+        opts = task.get('plot_options', {})
+        
+        freq_unit = opts.get('frequency_unit', 'Hz')
+        if freq_unit.lower() == 'rpm': y_all = y_all * 60.0
+        
+        fit_range = task.get('fit_range', [0, 1])
+        result = self.fitter.fit(t_all, y_all, fit_range=fit_range)
+        
+        if not result["success"]:
+            print(f"    ❌ フィッティング失敗: {result['message']}")
+            return
+
+        alpha, beta = result["alpha"], result["beta"]
+        print(f"    🧮 Fitting: alpha={alpha:.2f}, beta={beta:.4f}")
+
+        I_val = task.get('moment_of_inertia')
+        A_val, B_val = None, None
+        if I_val is not None:
+            A_val, B_val = self.fitter.calculate_physics_params(alpha, beta, float(I_val))
+
+        margin_left = 0.15
+        margin_right = 0.82
+        margin_bottom = 0.15
+        margin_top = 0.90
+        figsize = (7, 5)
+        if opts.get('aspect_ratio') == 'square': figsize = (6, 6)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.subplots_adjust(left=margin_left, right=margin_right, bottom=margin_bottom, top=margin_top)
+        
+        series_styles = opts.get('series_styles', {})
+        
+        def get_style(key, default_label, default_color):
+            style = series_styles.get(key, {})
+            visible = style.get('visible', True)
+            label = style.get('label', default_label)
+            
+            if label is None:
+                label = "_nolegend_"
+            
+            return {
+                'visible': visible,
+                'linestyle': style.get('linestyle', 'None'),
+                'marker': style.get('marker', '.'),
+                'markersize': style.get('markersize', 2.0),
+                'color': style.get('color', default_color),
+                'linewidth': style.get('linewidth', 1.5),
+                'label': label
+            }
+
+        s_raw = get_style('raw_data', 'Raw Data', 'lightgray')
+        if s_raw['visible']:
+            ax.plot(t_all, y_all, linestyle=s_raw['linestyle'], marker=s_raw['marker'], 
+                    markersize=s_raw['markersize'], color=s_raw['color'], label=s_raw['label'], zorder=1)
+        
+        s_used = get_style('used_data', 'Used for Fit', 'black')
+        if s_used['visible']:
+            ax.plot(result["t_use"], result["y_use"], linestyle=s_used['linestyle'], marker=s_used['marker'], 
+                    markersize=s_used['markersize'], color=s_used['color'], label=s_used['label'], zorder=2)
+        
+        s_fit = get_style('fit_model', 'Fit Model', 'red')
+        if s_fit['visible']:
+            t_plot = np.linspace(fit_range[0], fit_range[1], 500)
+            y_plot = result["fit_func"](t_plot)
+            ax.plot(t_plot, y_plot, linestyle=s_fit['linestyle'], linewidth=s_fit['linewidth'], 
+                    color=s_fit['color'], label=s_fit['label'], zorder=3)
+        
+        ax.set_title(title)
+        ax.set_xlabel(opts.get('x_label', "Time [s]"))
+        ax.set_ylabel(opts.get('y_label', f"Speed [{freq_unit}]"))
+        
+        if opts.get('x_lim'): ax.set_xlim(opts['x_lim'])
+        if opts.get('y_lim'): ax.set_ylim(opts['y_lim'])
+        if opts.get('grid'): ax.grid(True, linestyle=':')
+        
+        ax.minorticks_on()
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+        ax.tick_params(which='both', top=True, right=True, direction='in')
+        
+        legend_opts = opts.get('legend', {})
+        ax.legend(loc=legend_opts.get('loc', 'upper right'), frameon=False, fontsize=legend_opts.get('fontsize', 12))
+        
+        lines = [
+            r"$\alpha = {:.3f} \, [\mathrm{{rad/s^2}}]$".format(alpha),
+            r"$\beta = {:.4f} \, [\mathrm{{1/s}}]$".format(beta)
+        ]
+        
+        if I_val is not None:
+            lines.append(r"$I = {} \, [\mathrm{{kg \cdot m^2}}]$".format(self._to_latex_sci(I_val, 2)))
+            lines.append(r"$A = {} \, [\mathrm{{N \cdot m}}]$".format(self._to_latex_sci(A_val, 3)))
+            lines.append(r"$B = {} \, [\mathrm{{N \cdot m \cdot s/rad}}]$".format(self._to_latex_sci(B_val, 3)))
+        
+        res_text = "\n".join(lines)
+        
+        stats_conf = opts.get('stats', {})
+        stats_pos = stats_conf.get('position', [0.05, 0.05])
+        stats_fontsize = stats_conf.get('fontsize', 12)
+        stats_color = stats_conf.get('color', 'red')
+        
+        props = dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor=stats_color)
+        
+        va = 'top' if stats_pos[1] > 0.5 else 'bottom'
+        ha = 'right' if stats_pos[0] > 0.5 else 'left'
+        
+        ax.text(stats_pos[0], stats_pos[1], res_text, transform=ax.transAxes, fontsize=stats_fontsize,
+                verticalalignment=va, horizontalalignment=ha, bbox=props)
+        
+        safe_title = title.replace(" ", "_").replace("/", "-")
+        save_name = f"{shot_name}_CoastingFit.png"
+        plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
+        plt.close()
+        print(f"    📈 保存: {save_name}")

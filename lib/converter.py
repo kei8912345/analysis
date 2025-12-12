@@ -9,7 +9,6 @@ class DataConverter:
     def __init__(self):
         pass
 
-    # ★修正: default_start_time を受け取るように変更
     def process(self, csv_path, output_dir, sensor_configs, processing_config, default_sampling_rate=None, default_start_time=0.0):
         """
         CSVを読み込み、SensorDataの辞書に変換して保存する。
@@ -22,6 +21,10 @@ class DataConverter:
         try:
             raw_df = self._smart_load_csv(csv_path)
             if raw_df is None: return None
+            
+            # ★修正: CSVのカラム名一覧を表示（デバッグ用）
+            print(f"    ℹ️  CSV Columns: {list(raw_df.columns)}")
+            
         except Exception as e:
             print(f"  [エラー] CSV読み込み失敗: {e}")
             return None
@@ -43,6 +46,8 @@ class DataConverter:
                     target_col = clean_cols[col_id.strip()]
             
             if target_col is None:
+                # ★修正: 見つからなかったIDを警告として表示
+                print(f"    ⚠️  [Skip] ID not found: '{col_id}' (Target: {name})")
                 continue
 
             # 係数計算
@@ -61,13 +66,12 @@ class DataConverter:
             fs = float(sensor.get('sampling_rate', default_sampling_rate))
             unit = sensor.get('unit', '')
             
-            # ★修正: ここで start_time を正しくセット
             s_data = SensorData(
                 name=name,
                 data=phys_data,
                 fs=fs,
                 unit=unit,
-                start_time=default_start_time, # ← yamlの値を反映
+                start_time=default_start_time,
                 source=file_name
             )
             converted_dict[name] = s_data

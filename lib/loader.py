@@ -9,7 +9,7 @@ try:
     from .converter import DataConverter
     from .physics import PhysicsEngine
     from .processor import DataProcessor
-    from .structs import SensorData # 追加
+    from .structs import SensorData
 except ImportError:
     import sys
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -101,9 +101,12 @@ class DataLoader:
 
             if loaded_dict and isinstance(loaded_dict, dict):
                 data_store.update(loaded_dict)
+                # ★修正: 何がロードされたかをログに出す
+                loaded_keys = list(loaded_dict.keys())
                 print(f"  -> 結合: {len(loaded_dict)} items from {source_name}")
+                print(f"     👀 Loaded Keys: {loaded_keys}")
 
-        # --- ★追加: STFTの解析結果があればロードして時系列データとして統合 ---
+        # --- STFTの解析結果があればロードして時系列データとして統合 ---
         stft_dir = os.path.join(self.results_root, ".cache", "stft")
         stft_pkl = os.path.join(stft_dir, f"shot{shot_number:03d}_stft.pkl")
         if os.path.exists(stft_pkl):
@@ -113,13 +116,10 @@ class DataLoader:
                     count = 0
                     for key, val in stft_res.items():
                         if 'peak_freq' in val and 't' in val:
-                            # ピーク周波数の時系列
                             t_arr = val['t']
-                            # fsは時間刻みの逆数から概算
                             fs_est = 1.0 / (t_arr[1] - t_arr[0]) if len(t_arr) > 1 else 1.0
                             t0 = t_arr[0]
                             
-                            # 名前: 元の名前 + "_PeakFreq"
                             new_name = f"{key}_PeakFreq"
                             data_store[new_name] = SensorData(
                                 name=new_name,
@@ -130,7 +130,6 @@ class DataLoader:
                                 source="STFT_Analysis"
                             )
                             
-                            # 強度も保存: 元の名前 + "_PeakPower"
                             new_name_p = f"{key}_PeakPower"
                             data_store[new_name_p] = SensorData(
                                 name=new_name_p,
