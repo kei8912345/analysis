@@ -106,6 +106,8 @@ class Visualizer:
                 if stft_data: self._plot_spectrogram(stft_data, task, shot_name)
             elif kind == 'coasting_fit':
                 if data_store: self._plot_coasting_fit(data_store, task, shot_name)
+            elif kind == 'scatter': # ★追加
+                self._plot_scatter(task)
 
     def _plot_timeseries(self, data_store, task):
         title = task.get('title', 'Untitled')
@@ -115,10 +117,11 @@ class Visualizer:
             targets = list(opts['legend_labels'].keys())
             print(f"    ℹ️  [設定] '{title}': 凡例ラベル置換あり -> {targets}")
         
+        # ★修正: タイトルを下に配置するため、下余白を拡大し、上余白を詰める
         margin_left = 0.15
         margin_right = 0.82
-        margin_bottom = 0.15
-        margin_top = 0.90
+        margin_bottom = 0.20 # 元 0.15 -> 0.22 -> 0.20
+        margin_top = 0.95    # 元 0.90
         
         figsize = (7, 5)
         if opts.get('aspect_ratio') == 'square': figsize = (6, 6)
@@ -185,7 +188,9 @@ class Visualizer:
             legend_fontsize = legend_opts.get('fontsize', 12)
             ax1.legend(all_lines, labs, loc=legend_loc, frameon=False, fontsize=legend_fontsize)
 
-        ax1.set_title(title)
+        # ★修正: タイトルを下に配置 (y座標を負に設定)
+        ax1.set_title(title, y=-0.18) # -0.22 -> -0.18
+        
         if opts.get('x_lim'): ax1.set_xlim(opts['x_lim'])
         if opts.get('y_lim'): ax1.set_ylim(opts['y_lim'])
         if opts.get('grid'): ax1.grid(True, linestyle=':')
@@ -285,10 +290,11 @@ class Visualizer:
         else:
             default_y_label = "Freq [Hz]"
             
+        # ★修正: タイトルを下に配置するため調整
         margin_left = 0.15
         margin_right = 0.82
-        margin_bottom = 0.15
-        margin_top = 0.90
+        margin_bottom = 0.20 # 元 0.15 -> 0.22 -> 0.20
+        margin_top = 0.95    # 元 0.90
         
         fig, ax = plt.subplots(figsize=(7, 5))
         fig.subplots_adjust(left=margin_left, right=margin_right, bottom=margin_bottom, top=margin_top)
@@ -306,7 +312,8 @@ class Visualizer:
         cax = fig.add_axes([cax_left, cax_bottom, cax_width, cax_height])
         plt.colorbar(mesh, cax=cax, label=opts.get('c_label', "Power [dB]"))
         
-        ax.set_title(task.get('title', target))
+        # ★修正: タイトルを下に配置
+        ax.set_title(task.get('title', target), y=-0.18) # -0.22 -> -0.18
         ax.set_xlabel(opts.get('x_label', "Time [s]"))
         ax.set_ylabel(opts.get('y_label', default_y_label))
         
@@ -354,10 +361,12 @@ class Visualizer:
         if I_val is not None:
             A_val, B_val = self.fitter.calculate_physics_params(alpha, beta, float(I_val))
 
+        # ★修正: タイトルを下に配置するため調整
         margin_left = 0.15
         margin_right = 0.82
-        margin_bottom = 0.15
-        margin_top = 0.90
+        margin_bottom = 0.20 # 元 0.15 -> 0.22 -> 0.20
+        margin_top = 0.95    # 元 0.90
+        
         figsize = (7, 5)
         if opts.get('aspect_ratio') == 'square': figsize = (6, 6)
 
@@ -401,7 +410,9 @@ class Visualizer:
             ax.plot(t_plot, y_plot, linestyle=s_fit['linestyle'], linewidth=s_fit['linewidth'], 
                     color=s_fit['color'], label=s_fit['label'], zorder=3)
         
-        ax.set_title(title)
+        # ★修正: タイトルを下に配置
+        ax.set_title(title, y=-0.18) # -0.22 -> -0.18
+        
         ax.set_xlabel(opts.get('x_label', "Time [s]"))
         ax.set_ylabel(opts.get('y_label', f"Speed [{freq_unit}]"))
         
@@ -447,3 +458,97 @@ class Visualizer:
         plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
         plt.close()
         print(f"    📈 保存: {save_name}")
+
+    def _plot_scatter(self, task):
+        """
+        散布図を描画する (ハードコーディングデータ用)
+        Visualizerのスタイルを適用。
+        """
+        title = task.get('title', 'Scatter Plot')
+        data_points = task.get('data', [])
+        opts = task.get('plot_options', {})
+
+        # 余白調整 (デフォルト設定)
+        margin_left = 0.15
+        margin_right = 0.90
+        margin_bottom = 0.20
+        margin_top = 0.95
+        
+        # ★追加: ユーザー指定のレイアウト調整があれば上書き
+        layout = opts.get('layout_adjust', {})
+        if layout:
+            margin_left = layout.get('left', margin_left)
+            margin_right = layout.get('right', margin_right)
+            margin_bottom = layout.get('bottom', margin_bottom)
+            margin_top = layout.get('top', margin_top)
+        
+        figsize = (6, 6) # 正方形デフォルト
+        
+        # ★追加: figsizeのユーザー指定対応
+        if opts.get('figsize'):
+            figsize = tuple(opts['figsize'])
+        elif opts.get('aspect_ratio') == 'square': 
+            figsize = (6, 6)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        fig.subplots_adjust(left=margin_left, right=margin_right, bottom=margin_bottom, top=margin_top)
+
+        # プロット
+        default_marker = opts.get('marker', 'o')
+        default_size = opts.get('markersize', 80)
+        
+        # ★修正: facecolorは白固定、edgecolorにcolorを適用
+        default_edge_color = opts.get('edgecolors', 'black')
+
+        for point in data_points:
+            label = point.get('label', '')
+            x = point.get('x')
+            y = point.get('y')
+            
+            marker = point.get('marker', default_marker)
+            size = point.get('markersize', default_size)
+            
+            # color指定を枠線色(edgecolor)に使用
+            edge_color = point.get('color', default_edge_color)
+            
+            if x is not None and y is not None:
+                ax.scatter(x, y, label=label, s=size, marker=marker, 
+                           facecolors='white', edgecolors=edge_color, linewidth=1.5, alpha=1.0, zorder=3)
+
+        # 軸ラベル
+        ax.set_xlabel(opts.get('x_label', 'X'))
+        ax.set_ylabel(opts.get('y_label', 'Y'))
+        
+        # タイトル
+        ax.set_title(title, y=-0.18)
+
+        # 軸範囲
+        if opts.get('x_lim'): ax.set_xlim(opts['x_lim'])
+        if opts.get('y_lim'): ax.set_ylim(opts['y_lim'])
+
+        # グリッド
+        if opts.get('grid'): ax.grid(True, linestyle=':')
+
+        # 目盛
+        ax.minorticks_on()
+        ax.xaxis.set_minor_locator(AutoMinorLocator())
+        ax.yaxis.set_minor_locator(AutoMinorLocator())
+        ax.tick_params(which='both', top=True, right=True, direction='in')
+
+        # 凡例 (bbox_to_anchor対応)
+        legend_opts = opts.get('legend', {})
+        loc = legend_opts.get('loc', 'best')
+        bbox = legend_opts.get('bbox_to_anchor') # 追加
+        fontsize = legend_opts.get('fontsize', 10)
+        
+        if bbox:
+            ax.legend(loc=loc, bbox_to_anchor=bbox, frameon=False, fontsize=fontsize)
+        else:
+            ax.legend(loc=loc, frameon=False, fontsize=fontsize)
+
+        # 保存
+        safe_title = title.replace(" ", "_").replace("/", "-")
+        save_name = f"{safe_title}.png"
+        plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
+        plt.close()
+        print(f"    🔵 散布図保存: {save_name}")
