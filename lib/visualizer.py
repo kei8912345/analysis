@@ -271,7 +271,11 @@ class Visualizer:
         safe_title = title.replace(" ", "_").replace("/", "-")
         save_path = os.path.join(self.figures_dir, f"{safe_title}.png")
         plt.savefig(save_path, dpi=300)
-        plt.close()
+        
+        # ★ここを変更: close()せずにshow()する
+        plt.show()
+        # plt.close() # SpyderのPlotsペインに表示させるためコメントアウト
+        
         print(f"    📈 保存: {os.path.basename(save_path)}")
 
     def _plot_spectrogram(self, stft_all_data, task, shot_name):
@@ -327,7 +331,11 @@ class Visualizer:
 
         save_name = f"{shot_name}_STFT_{target}.png" if shot_name else f"STFT_{target}.png"
         plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
-        plt.close()
+        
+        # ★ここを変更: close()せずにshow()する
+        plt.show()
+        # plt.close()
+        
         print(f"    🌈 STFT描画: {save_name} (Unit: {freq_unit})")
 
     def _plot_coasting_fit(self, data_store, task, shot_name="UnknownShot"):
@@ -456,7 +464,11 @@ class Visualizer:
         safe_title = title.replace(" ", "_").replace("/", "-")
         save_name = f"{shot_name}_CoastingFit.png"
         plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
-        plt.close()
+        
+        # ★ここを変更: close()せずにshow()する
+        plt.show()
+        # plt.close()
+        
         print(f"    📈 保存: {save_name}")
 
     def _plot_scatter(self, task):
@@ -550,5 +562,9 @@ class Visualizer:
         safe_title = title.replace(" ", "_").replace("/", "-")
         save_name = f"{safe_title}.png"
         plt.savefig(os.path.join(self.figures_dir, save_name), dpi=300)
-        plt.close()
+        
+        # ★ここを変更: close()せずにshow()する
+        plt.show()
+        # plt.close()
+        
         print(f"    🔵 散布図保存: {save_name}")
