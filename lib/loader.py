@@ -44,6 +44,7 @@ class DataLoader:
         
         data_store = {}
 
+        # 1. 各ソースからのデータロード (CSV, HSC等)
         for source_name, source_info in self.sources.items():
             if source_name not in self.TARGET_SOURCES: continue
 
@@ -101,12 +102,10 @@ class DataLoader:
 
             if loaded_dict and isinstance(loaded_dict, dict):
                 data_store.update(loaded_dict)
-                # ★修正: 何がロードされたかをログに出す
                 loaded_keys = list(loaded_dict.keys())
                 print(f"  -> 結合: {len(loaded_dict)} items from {source_name}")
-                print(f"     👀 Loaded Keys: {loaded_keys}")
 
-        # --- STFTの解析結果があればロードして時系列データとして統合 ---
+        # 2. STFT解析結果のロード
         stft_dir = os.path.join(self.results_root, ".cache", "stft")
         stft_pkl = os.path.join(stft_dir, f"shot{shot_number:03d}_stft.pkl")
         if os.path.exists(stft_pkl):
@@ -149,13 +148,54 @@ class DataLoader:
             print("❌ 有効なデータがロードできませんでした。")
             return {}
 
-        # 後処理
+        # 3. 前処理 (Pre-processing)
+        # 物理量計算の前に、圧力のオフセット補正などが必要なためここで実行
         pre_pipeline = spec_config.get('pre_processing', [])
-        if pre_pipeline: self.processor.apply_preprocessing(data_store, pre_pipeline)
+        if pre_pipeline: 
+            self.processor.apply_preprocessing(data_store, pre_pipeline)
 
+        # 4. 物理量計算 (Derived Channels) ★ここを修正してキャッシュ対応
         derived = spec_config.get('derived_channels', {})
-        self.physics.add_derived_channels(data_store, derived)
+        if derived:
+            # キャッシュ保存先の設定
+            derived_cache_dir = os.path.join(self.results_root, ".cache", "derived")
+            os.makedirs(derived_cache_dir, exist_ok=True)
+            derived_pkl_path = os.path.join(derived_cache_dir, f"shot{shot_number:03d}_derived.pkl")
+            
+            loaded_derived = False
+            
+            # キャッシュ読み込みトライ
+            if not force_reload and os.path.exists(derived_pkl_path):
+                try:
+                    with open(derived_pkl_path, 'rb') as f:
+                        derived_data = pickle.load(f)
+                        data_store.update(derived_data)
+                        print(f"  -> 派生物理量(キャッシュ)結合: {len(derived_data)} items")
+                        loaded_derived = True
+                except Exception as e:
+                    print(f"  ⚠️ 派生量キャッシュロード失敗: {e}")
 
+            # キャッシュがない、またはロード失敗なら計算して保存
+            if not loaded_derived:
+                keys_before = set(data_store.keys())
+                
+                # 計算実行 (data_storeに直接追加される)
+                self.physics.add_derived_channels(data_store, derived)
+                
+                keys_after = set(data_store.keys())
+                new_keys = keys_after - keys_before
+                
+                # 新しく増えたデータだけを保存
+                if new_keys:
+                    derived_data_to_save = {k: data_store[k] for k in new_keys}
+                    try:
+                        with open(derived_pkl_path, 'wb') as f:
+                            pickle.dump(derived_data_to_save, f)
+                        print(f"  💾 派生物理量を保存: {derived_pkl_path} ({len(new_keys)} items)")
+                    except Exception as e:
+                        print(f"  ⚠️ 派生量保存失敗: {e}")
+
+        # 5. 後処理 (Post-processing)
         post_pipeline = spec_config.get('post_processing', [])
         if post_pipeline: self.processor.apply_preprocessing(data_store, post_pipeline)
 
